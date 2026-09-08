@@ -9,16 +9,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import APP_DIR, DB_PATH, LOCK_PATH
+from . import config
 
 
 def prepare_private_path() -> None:
-    APP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(APP_DIR, 0o700)
+    config.APP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(config.APP_DIR, 0o700)
 
 
 @contextmanager
-def process_lock(path: Path = LOCK_PATH) -> Iterator[None]:
+def process_lock(path: Path | None = None) -> Iterator[None]:
+    path = path or config.APP_DIR / "sync.lock"
     prepare_private_path()
     with path.open("a+", encoding="utf-8") as handle:
         os.chmod(path, 0o600)
@@ -30,8 +31,9 @@ def process_lock(path: Path = LOCK_PATH) -> Iterator[None]:
 
 
 class State:
-    def __init__(self, path: Path = DB_PATH):
+    def __init__(self, path: Path | None = None):
         prepare_private_path()
+        path = path or config.APP_DIR / "state.sqlite3"
         self.path = path
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
@@ -50,6 +52,12 @@ class State:
         """)
         self.db.commit()
         self.secure_files()
+
+    def bind_identity(self) -> None:
+        existing = self.get_meta("sync_identity")
+        if (existing and existing != config.settings.owner) or (not existing and self.event_count()):
+            raise config.ConfigError("State belongs to another Canvas/calendar configuration or an older installation. Use a separate profile; do not reuse its mappings.")
+        self.set_meta("sync_identity", config.settings.owner)
 
     def secure_files(self) -> None:
         for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
@@ -87,4 +95,4 @@ class State:
 
     def status(self) -> dict[str, Any]:
         row = self.db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
-        return {"eventMappingCount": self.event_count(), "lastRun": dict(row) if row else None, "lastSuccessfulSingaporeDate": self.get_meta("last_successful_singapore_date")}
+        return {"eventMappingCount": self.event_count(), "lastRun": dict(row) if row else None, "lastSuccessfulLocalDate": self.get_meta("last_successful_local_date"), "timezone": config.settings.timezone}

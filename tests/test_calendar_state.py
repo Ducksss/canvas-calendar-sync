@@ -2,6 +2,7 @@ import datetime as dt
 from pathlib import Path
 
 import pytest
+from canvas_calendar_sync import config
 
 from canvas_calendar_sync.google_calendar import CalendarError, confirms_deleted, desired_event, index_owned, verify_event
 from canvas_calendar_sync.state import State
@@ -9,14 +10,14 @@ from canvas_calendar_sync.sync import scheduled_due
 
 
 def item():
-    return {"sourceKey": "canvas:1:assignment:2", "fingerprint": "abc", "calendarTitle": "[Canvas] ABC — Work due", "calendarDescription": "Course: ABC\nCanvas: https://canvas.nus.edu.sg/x\nSynced automatically from NUS Canvas.", "dueAt": "2026-09-01T01:00:00Z", "eventEndAt": "2026-09-01T01:15:00Z"}
+    return {"sourceKey": "canvas:1:assignment:2", "fingerprint": "abc", "calendarTitle": "[Canvas] ABC — Work due", "calendarDescription": "Course: ABC\nCanvas: https://canvas.example.edu/x\nSynced automatically from Canvas.", "dueAt": "2026-09-01T01:00:00Z", "eventEndAt": "2026-09-01T01:15:00Z"}
 
 
 def test_event_contract():
     event = desired_event(item())
     assert event["visibility"] == "private" and event["transparency"] == "transparent"
     assert event["attendees"] == [] and "conferenceData" not in event
-    assert event["extendedProperties"]["private"]["canvasSyncOwner"] == "canvas-calendar-sync-v1"
+    assert event["extendedProperties"]["private"]["canvasSyncOwner"] == config.settings.owner
     assert {x["minutes"] for x in event["reminders"]["overrides"]} == {60, 1440}
 
 
@@ -42,7 +43,7 @@ def test_delete_readback_accepts_only_cancelled_events():
 
 
 def test_duplicate_owned_event_fails():
-    events = [{"extendedProperties": {"private": {"canvasSourceKey": "same"}}}, {"extendedProperties": {"private": {"canvasSourceKey": "same"}}}]
+    events = [{"extendedProperties": {"private": {"canvasSyncOwner": config.settings.owner, "canvasSourceKey": "same"}}}, {"extendedProperties": {"private": {"canvasSyncOwner": config.settings.owner, "canvasSourceKey": "same"}}}]
     with pytest.raises(CalendarError) as caught: index_owned(events)
     assert caught.value.code == "duplicate_owned_event"
 
@@ -52,7 +53,7 @@ def test_sqlite_permissions_and_scheduled_guard(tmp_path: Path):
     try:
         assert scheduled_due(state, dt.datetime(2026, 8, 22, 2, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))) == (False, "before_daily_window")
         assert scheduled_due(state, dt.datetime(2026, 8, 22, 3, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))) == (True, "2026-08-22")
-        state.set_meta("last_successful_singapore_date", "2026-08-22")
+        state.set_meta("last_successful_local_date", "2026-08-22")
         assert scheduled_due(state, dt.datetime(2026, 8, 22, 4, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))) == (False, "already_succeeded_today")
     finally: state.close()
     assert (tmp_path / "state.sqlite3").stat().st_mode & 0o777 == 0o600

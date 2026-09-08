@@ -50,6 +50,12 @@ def test_scheduled_failure_records_stage_and_safe_exception_type(monkeypatch, ca
     records, log_lines, notifications = [], [], []
 
     class FakeState:
+        def bind_identity(self):
+            pass
+
+        def set_meta(self, *_args):
+            pass
+
         def begin_run(self, mode):
             assert mode == "scheduled"
             return 42

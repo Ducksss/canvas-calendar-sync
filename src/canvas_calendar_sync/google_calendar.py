@@ -15,7 +15,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from keyring.errors import KeyringError
 
-from .config import GOOGLE_KEYCHAIN_SERVICE, GOOGLE_SCOPE, OWNER, TIME_ZONE
+from . import config
 
 
 class CalendarError(RuntimeError):
@@ -39,7 +39,7 @@ def store_secret(
     secret_setter = setter or keyring.set_password
     for attempt in range(MAX_BOUNDARY_RETRIES + 1):
         try:
-            secret_setter(GOOGLE_KEYCHAIN_SERVICE, account, value)
+            secret_setter(config.keychain_service(config.GOOGLE_KEYCHAIN_SERVICE), account, value)
             return
         except (KeyringError, OSError, TimeoutError) as error:
             if attempt >= MAX_BOUNDARY_RETRIES:
@@ -59,7 +59,7 @@ def get_secret(
     secret_getter = getter or keyring.get_password
     for attempt in range(MAX_BOUNDARY_RETRIES + 1):
         try:
-            value = secret_getter(GOOGLE_KEYCHAIN_SERVICE, account)
+            value = secret_getter(config.keychain_service(config.GOOGLE_KEYCHAIN_SERVICE), account)
         except (KeyringError, OSError, TimeoutError) as error:
             if attempt >= MAX_BOUNDARY_RETRIES:
                 raise CalendarError(
@@ -80,11 +80,11 @@ def setup_google(path: Path) -> dict[str, Any]:
     desktop = config.get("installed")
     if not isinstance(desktop, dict) or not desktop.get("client_id") or not desktop.get("client_secret"):
         raise CalendarError("invalid_client_secrets", "A Google Desktop OAuth client-secrets file is required.")
-    flow = InstalledAppFlow.from_client_config(config, [GOOGLE_SCOPE])
+    flow = InstalledAppFlow.from_client_config(config, [config.GOOGLE_SCOPE])
     credentials = flow.run_local_server(port=0, access_type="offline", prompt="consent", open_browser=True)
     if not credentials.refresh_token: raise CalendarError("missing_refresh_token", "Google did not return an offline refresh token.")
     store_secret("client-id", desktop["client_id"]); store_secret("client-secret", desktop["client_secret"]); store_secret("refresh-token", credentials.refresh_token)
-    return {"ok": True, "scope": GOOGLE_SCOPE, "storedIn": "macOS Keychain"}
+    return {"ok": True, "scope": config.GOOGLE_SCOPE, "storedIn": "macOS Keychain"}
 
 
 def refresh_credentials(
@@ -114,7 +114,7 @@ def refresh_credentials(
 
 
 def service():
-    credentials = Credentials(token=None, refresh_token=get_secret("refresh-token"), token_uri="https://oauth2.googleapis.com/token", client_id=get_secret("client-id"), client_secret=get_secret("client-secret"), scopes=[GOOGLE_SCOPE])
+    credentials = Credentials(token=None, refresh_token=get_secret("refresh-token"), token_uri="https://oauth2.googleapis.com/token", client_id=get_secret("client-id"), client_secret=get_secret("client-secret"), scopes=[config.GOOGLE_SCOPE])
     refresh_credentials(credentials)
     return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
@@ -126,17 +126,22 @@ def execute(request: Any) -> Any:
 
 
 def list_owned(api: Any) -> list[dict[str, Any]]:
-    token, events = None, []
-    while True:
-        result = execute(api.events().list(calendarId="primary", privateExtendedProperty=f"canvasSyncOwner={OWNER}", maxResults=2500, pageToken=token, showDeleted=False, singleEvents=True))
-        items = result.get("items")
-        if not isinstance(items, list): raise CalendarError("malformed_calendar_response", "Google Calendar returned an invalid event collection.")
+    token, events, seen = None, [], set()
+    for _ in range(1000):
+        result = execute(api.events().list(calendarId=config.settings.calendar_id, privateExtendedProperty=f"canvasSyncOwner={config.settings.owner}", maxResults=2500, pageToken=token, showDeleted=False, singleEvents=True))
+        items = result.get("items", []) if isinstance(result, dict) else None
+        if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
+            raise CalendarError("malformed_calendar_response", "Google Calendar returned an invalid event collection.")
         events.extend(items); token = result.get("nextPageToken")
         if not token: return events
+        if not isinstance(token, str) or token in seen:
+            raise CalendarError("calendar_pagination_error", "Google Calendar pagination is incomplete or repeated.")
+        seen.add(token)
+    raise CalendarError("calendar_pagination_error", "Google Calendar pagination exceeded the safety limit.")
 
 
 def desired_event(item: dict[str, Any]) -> dict[str, Any]:
-    return {"summary": item["calendarTitle"], "description": item["calendarDescription"], "start": {"dateTime": item["dueAt"], "timeZone": TIME_ZONE}, "end": {"dateTime": item["eventEndAt"], "timeZone": TIME_ZONE}, "visibility": "private", "transparency": "transparent", "attendees": [], "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 1440}, {"method": "popup", "minutes": 60}]}, "extendedProperties": {"private": {"canvasSyncOwner": OWNER, "canvasSourceKey": item["sourceKey"], "canvasFingerprint": item["fingerprint"]}}}
+    return {"summary": item["calendarTitle"], "description": item["calendarDescription"], "start": {"dateTime": item["dueAt"], "timeZone": config.settings.timezone}, "end": {"dateTime": item["eventEndAt"], "timeZone": config.settings.timezone}, "visibility": "private", "transparency": "transparent", "attendees": [], "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 1440}, {"method": "popup", "minutes": 60}]}, "extendedProperties": {"private": {"canvasSyncOwner": config.settings.owner, "canvasSourceKey": item["sourceKey"], "canvasFingerprint": item["fingerprint"]}}}
 
 
 def private_props(event: dict[str, Any]) -> dict[str, str]:
@@ -148,6 +153,8 @@ def index_owned(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for event in events:
         props = private_props(event); source = props.get("canvasSourceKey")
+        if props.get("canvasSyncOwner") != config.settings.owner:
+            raise CalendarError("foreign_event", "Calendar returned an event outside this sync configuration's ownership.")
         if not source: raise CalendarError("owned_event_missing_source", "An owned Calendar event lacks its Canvas source key.")
         if source in result: raise CalendarError("duplicate_owned_event", "Multiple owned Calendar events share a Canvas source key.")
         result[source] = event
@@ -156,7 +163,7 @@ def index_owned(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def verify_event(event: dict[str, Any], item: dict[str, Any]) -> None:
     expected, props = desired_event(item), private_props(event)
-    checks = [event.get("summary") == expected["summary"], event.get("description", "") == expected["description"], same_instant(event.get("start", {}).get("dateTime"), expected["start"]["dateTime"]), same_instant(event.get("end", {}).get("dateTime"), expected["end"]["dateTime"]), event.get("visibility") == "private", event.get("transparency") == "transparent", not event.get("attendees"), not event.get("conferenceData"), props.get("canvasSyncOwner") == OWNER, props.get("canvasSourceKey") == item["sourceKey"], props.get("canvasFingerprint") == item["fingerprint"]]
+    checks = [event.get("summary") == expected["summary"], event.get("description", "") == expected["description"], same_instant(event.get("start", {}).get("dateTime"), expected["start"]["dateTime"]), same_instant(event.get("end", {}).get("dateTime"), expected["end"]["dateTime"]), event.get("visibility") == "private", event.get("transparency") == "transparent", not event.get("attendees"), not event.get("conferenceData"), props.get("canvasSyncOwner") == config.settings.owner, props.get("canvasSourceKey") == item["sourceKey"], props.get("canvasFingerprint") == item["fingerprint"]]
     reminders = {(x.get("method"), x.get("minutes")) for x in event.get("reminders", {}).get("overrides", [])}
     checks.append(reminders == {("popup", 1440), ("popup", 60)})
     if not all(checks): raise CalendarError("calendar_readback_mismatch", "Calendar event read-back did not match the requested state.")
@@ -174,7 +181,7 @@ def same_instant(actual: Any, expected: Any) -> bool:
 
 
 def get_event(api: Any, event_id: str) -> dict[str, Any]:
-    result = execute(api.events().get(calendarId="primary", eventId=event_id))
+    result = execute(api.events().get(calendarId=config.settings.calendar_id, eventId=event_id))
     if not isinstance(result, dict): raise CalendarError("malformed_calendar_response", "Google Calendar returned an invalid event.")
     return result
 

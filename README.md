@@ -1,148 +1,204 @@
 # Canvas Calendar Sync
 
-Standalone Python 3.11 application that reads future NUS Canvas coursework
-deadlines and reconciles them with the primary Google Calendar. Routine runs
-call the APIs directly; no Codex session or LLM is required.
+Sync future Canvas coursework deadlines to a Google Calendar you own. Runs
+locally on macOS with Python, Keychain and launchd. No LLM, hosted backend or
+shared developer credentials are needed for normal operation.
 
-## What it syncs
+**Early release:** macOS and Python 3.11 are supported. Configure your own
+Canvas institution and Google OAuth client. Institutional API restrictions may
+prevent access; the app stops rather than treating denied access as no deadlines.
 
-Active student courses, published assignments (including graded quizzes,
-discussions and external-tool assignments), and relevant dated planner items.
-Canvas returns user-specific assignment dates with `override_assignment_dates=true`.
-Submitted coursework stays visible; only future deadlines enter discovery.
-Planner items linked to an already discovered assignment are deduplicated.
-Deadlines never exposed through Canvas cannot be discovered.
+## What gets synced
 
-Each deadline becomes a private, transparent, 15-minute event starting at its
-exact due time, with popup reminders 24 hours and 1 hour beforehand. Events
-contain the course and Canvas link, without attendees or conferencing.
+- Published assignments in active student courses, including graded quizzes,
+  discussions and external-tool work represented as Canvas assignments.
+- Relevant dated planner items, with assignment-linked items deduplicated.
+- Student-specific assignment dates returned by Canvas; submitted work stays
+  visible. Only future deadlines are imported.
 
-## Install and authorize
+Events start at the exact deadline and last 15 minutes. They are private,
+transparent, attendee-free and have popup reminders 24 hours and 1 hour before.
+The description includes the course and Canvas link. Ordinary classes,
+announcements, wiki pages and dates only present inside an external tool are
+not imported. This is not a general Canvas content scraper.
 
-Requires macOS, Python 3.11, `uv`, a Canvas access token, and a Google Desktop
-OAuth client with Calendar API enabled. Use the `calendar.events.owned` scope.
-Keep the consent app in Production for a durable personal refresh token;
-Testing-mode refresh tokens can expire after seven days.
+## Quick start
 
-Copy this repository's source files to
-`~/Library/Application Support/CanvasCalendarSync`, preserving any existing
-runtime database and credentials. Do not replace a working installation's
-state with repository files. Then:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), clone this
+repository into a stable folder, and run:
 
 ```sh
-cd "$HOME/Library/Application Support/CanvasCalendarSync"
 uv sync --locked
+uv run --locked canvas-calendar-sync init \
+  --canvas-url https://canvas.example.edu \
+  --timezone America/New_York
+uv run --locked canvas-calendar-sync setup-canvas
 ```
 
-Use macOS Keychain Access to create a generic password item with service
-`codex-canvas-calendar-sync`, account `canvas.nus.edu.sg`, and the Canvas token
-as its password. Do not put the token in a shell command or this repository.
+Replace the example URL with your institution's Canvas HTTPS origin (without
+`/api` or a course path) and choose an IANA timezone such as `Europe/London`,
+`Asia/Singapore` or `America/Los_Angeles`. Create a personal access token in your
+Canvas account settings if your institution allows it. `setup-canvas` prompts
+without echoing the token and stores it in macOS Keychain. It accepts no token
+argument. Never paste a credential into an issue or commit.
 
-Authorize Google once from a temporary Desktop client-secrets file:
+For Google setup, create your own Google Cloud project, enable the Calendar API,
+configure OAuth consent, and create a **Desktop app** OAuth client. Download its
+client-secrets JSON temporarily outside the checkout. Then run:
 
 ```sh
-.venv/bin/canvas-calendar-sync setup-google --client-secrets /private/path/client-secrets.json
-.venv/bin/canvas-calendar-sync probe
-.venv/bin/canvas-calendar-sync sync --dry-run --json
+uv run --locked canvas-calendar-sync setup-google --client-secrets /private/path/client-secrets.json
+uv run --locked canvas-calendar-sync probe
+uv run --locked canvas-calendar-sync sync --dry-run --json
+uv run --locked canvas-calendar-sync sync --json
 ```
 
-Setup stores the client ID, client secret and refresh token in macOS Keychain
-under service `canvas-calendar-sync-google-oauth`. Access tokens stay in memory.
-Setup does not remove its input file: remove the temporary client-secrets file
-yourself after successful import. Never commit it.
+The browser consent requests `calendar.events.owned`. Use your primary calendar
+or an owned calendar ID supplied to `init --calendar-id ...`. Each user brings
+their own OAuth client: this repository does not distribute one. Google stores
+client credentials and the refresh token in Keychain; access tokens stay in
+memory. Remove the downloaded JSON after successful import; setup does not
+delete it for you.
 
-## Commands and scheduling
+External OAuth apps left in Testing commonly receive refresh tokens that expire
+after seven days for this scope. Configure the project's publishing status and
+consent appropriately; organizational policy may also apply. See Google's
+[OAuth token expiration guidance](https://developers.google.com/identity/protocols/oauth2#expiration).
+
+## Configuration and profiles
+
+`init` creates a private `config.json` under
+`~/Library/Application Support/CanvasCalendarSyncCommunity`. It never overwrites
+existing configuration. No institution, username, email or secret is built in.
+
+```json
+{
+  "canvas_url": "https://canvas.example.edu/",
+  "timezone": "America/New_York",
+  "calendar_id": "primary",
+  "daily_hour": 3,
+  "daily_minute": 0
+}
+```
+
+Use `--daily-hour` and `--daily-minute` during init for another daily time.
+To isolate another installation, set the non-secret `CANVAS_CALENDAR_SYNC_HOME`
+environment variable to an absolute directory **before every command**. Profile
+state, logs, Keychain services and LaunchAgent labels are isolated by that path.
+The generated LaunchAgent remembers it automatically.
+
+Keep a stable profile path and back up its configuration and SQLite state. Moving
+it changes Keychain service names and the scheduler label. One profile supports
+one Canvas account and one Google account. Do not run multiple Canvas accounts
+from the same institution into the same calendar: event ownership is derived
+from Canvas origin and the configured calendar ID. Use distinct owned calendars.
+
+Changing the Canvas origin or destination in an established profile is rejected
+by the state identity guard. Create a separate profile and plan cleanup/migration
+of the old events first. Changing only timezone or daily time is supported by
+editing the non-secret configuration while no sync is running.
+
+## Automatic daily execution
+
+After a successful manual sync:
 
 ```sh
-.venv/bin/canvas-calendar-sync sync --json              # reconcile now
-.venv/bin/canvas-calendar-sync sync --dry-run --json    # plan; no Calendar writes
-.venv/bin/canvas-calendar-sync sync --scheduled --json  # daily guard
-.venv/bin/canvas-calendar-sync status --json
+uv run --locked canvas-calendar-sync install-schedule --dry-run
+uv run --locked canvas-calendar-sync install-schedule
 ```
 
-Dry-runs record a local run outcome, but do not mark the day successfully synced.
-`status` reports the latest run (which may be a dry-run), the last successful
-Singapore date, local mappings and a live owned-event count.
+Run the exact `loadCommand` printed by the second command to activate the
+LaunchAgent. Installation writes the plist but does not silently load it.
+The agent references this checkout's Python environment: keep the folder and
+virtual environment available. If the same label is already loaded, unload
+that job before loading its replacement.
 
-The template in `launchd/` targets the existing personal installation. Adjust
-its absolute home paths before using it on another Mac. Copy it to
-`~/Library/LaunchAgents/`, create `~/Library/Logs/CanvasCalendarSync`, and load it:
+The job wakes every 60 seconds and on login/load. The program decides whether
+the configured local time has passed, independently of the Mac's system
+timezone. It catches up when awake and online, usually within a minute, and
+skips after one successful run per local date. A failed scheduled attempt has
+a one-hour cooldown; each API/Keychain operation also has bounded retries.
+Daylight-saving changes use IANA rules. A nonexistent daily time runs after the
+clock jumps past it; a repeated time still gets only one successful daily run.
+The Mac must be logged in, and Keychain must be accessible. Sleeping or powered
+off machines cannot sync; next execution checks whether catch-up is due.
+
+Inspect or unload the job using the `label` printed during installation:
 
 ```sh
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.chaipinzheng.canvas-calendar-sync.plist"
-launchctl print "gui/$(id -u)/com.chaipinzheng.canvas-calendar-sync"
+launchctl print "gui/$(id -u)/LABEL_FROM_INSTALL"
+launchctl bootout "gui/$(id -u)/LABEL_FROM_INSTALL"
 ```
 
-The LaunchAgent triggers at 03:00 in the Mac's system timezone. Keep the Mac
-set to Asia/Singapore: the plist's `TZ` environment variable does not control
-launchd's wall-clock trigger. The program separately enforces its Singapore
-daily guard. RunAtLoad checks for a missed run after 03:00 on login/load.
-The Mac must be logged in, online, and able to access Keychain. There is no
-periodic offline-recovery trigger beyond bounded retries and load/login;
-after a persistent outage, run `sync --scheduled --json` to catch up.
+Unloading stops the job for the current login session. To prevent future login
+loads, also remove the generated plist identified by `launchAgent` in the
+installation output. Credentials and calendar events are retained.
 
-To unload the schedule while retaining state:
+## Status and troubleshooting
 
 ```sh
-launchctl bootout "gui/$(id -u)/com.chaipinzheng.canvas-calendar-sync"
+uv run --locked canvas-calendar-sync status --json
+uv run --locked canvas-calendar-sync probe
+uv run --locked canvas-calendar-sync sync --scheduled --json
 ```
 
-## Failure safety and retries
+`lastSuccessfulLocalDate` and `timezone` describe the daily guard. `lastRun` can
+be a dry-run: a dry-run records its outcome but does not mark the day synced.
+Manual `sync --json` runs immediately even before the daily time or during a
+scheduled retry cooldown. A manual success also satisfies the daily guard.
 
-Complete Canvas discovery and Calendar preflight reads precede reconciliation.
-Canvas access, pagination and malformed-response failures stop Calendar writes.
-Creates and updates precede deletion. An earlier Calendar error aborts the
-remaining run; successfully completed writes are not rolled back.
+Structured logs are under the profile's `logs/sync.jsonl` and rotate at 1 MB
+with five backups. Scheduled failures show a generic macOS notification. Logs
+include safe error codes, exception classes and execution stages, not unexpected
+exception text, tokens or HTTP bodies. Routine scheduler stdout is discarded
+to avoid unbounded logs of skipped ticks. Use `status` for the latest run.
 
-Hidden event properties identify ownership: `canvasSyncOwner`,
-`canvasSourceKey`, and `canvasFingerprint`. Only owned future events absent
-from a complete discovery can be deleted. Writes are read back before their
-mapping is recorded. SQLite and an exclusive process lock coordinate runs.
-Legacy CSYNC marker migration is resumable. Google insert retries do not
-guarantee exactly-once creation after an ambiguous network failure; duplicate
-ownership is detected on subsequent reconciliation and requires investigation.
+For a missing Canvas token, rerun `setup-canvas`. For rejected Google refresh
+credentials, repeat `setup-google`. Resolve API denial or incomplete discovery
+before writing to Calendar. Inspect a dry-run after any credential/configuration
+change. Do not clear mappings to work around a failed fetch.
 
-New boundary retries permit an initial attempt plus three retries, usually
-after 1, 2 and 4 seconds:
+## Safety and limits
 
-- Canvas transport failures and HTTP 408, 429, 500, 502, 503, 504 retry.
-  Numeric Retry-After delays are capped at 30 seconds. Requests use a 30-second
-  timeout; Keychain security commands use a 10-second timeout per attempt.
-- Canvas Keychain command failures retry. Google Keychain errors retry;
-  a missing Google credential fails immediately.
-- Google OAuth transport errors and explicitly retryable refresh errors retry.
-  Permanent refresh rejection fails immediately. Google libraries may also
-  retry internally, so four wrapper attempts are not a four-HTTP-call limit.
-- Calendar API requests retain the client's existing `num_retries=3` policy.
-  No additional wrapper retries were added around Calendar writes.
+Canvas discovery completes before Calendar mutations. Pagination and redirects
+must stay on the configured HTTPS origin. Calendar ownership reads are paginated
+and reject repeated tokens and foreign ownership. Creates/updates precede
+deletions; each write is read back before its mapping is recorded. Only owned
+future events absent from complete discovery can be deleted. Past events remain.
+The SQLite database uses private permissions and an exclusive process lock.
 
-Failures log an error code, execution stage and exception class in
-`~/Library/Logs/CanvasCalendarSync/sync.jsonl`. Known application errors use
-controlled messages; unexpected exception text is omitted. The underlying
-exception class is retained when wrapping supported boundary errors. Logs
-rotate at 1 MB with five backups. A scheduled failure raises a generic local
-notification. Credential values and API response bodies must never be logged.
+Canvas network errors and transient HTTP responses (408/429/500/502/503/504)
+allow three retries after the first attempt, normally after 1/2/4 seconds;
+numeric Retry-After is capped at 30 seconds. Canvas Keychain commands time out
+after 10 seconds each. Google Keychain and transient OAuth refresh failures have
+bounded retries; permanent OAuth rejection fails immediately. Google libraries
+may retry internally too. Calendar writes retain the SDK's existing retry policy.
 
-If authentication is rejected, rotate the appropriate Keychain credential or
-repeat Google setup, then run `probe` and a dry-run. If discovery is incomplete,
-resolve that failure before reconciling. Do not treat an error as an empty course
-list or manually clear event mappings. Historical generic failures cannot be
-diagnosed retroactively from the new fields.
+Successful earlier writes are not rolled back after a later failure. An ambiguous
+Calendar insert response can produce a duplicate; duplicate ownership stops the
+next reconciliation for investigation. This is not an exactly-once transaction
+across two APIs. Discovery covers Canvas APIs, not all material a course may
+publish. No Windows/Linux scheduler or credential backend is currently supported.
 
-## Development and verification
+Older personal installations use a different state directory and event marker.
+They are not automatically migrated. See [migration notes](docs/MIGRATION.md).
+
+## Development and release
 
 ```sh
 uv sync --locked
 uv run --locked pytest
 uv run --locked python -m compileall -q src tests
+uv build
 ```
 
-The suite uses fake API boundaries and temporary state. The optional workflow
-template in `docs/github-actions-tests.yml` needs no credentials and makes no
-live Canvas or Calendar calls. It is not active: the current GitHub OAuth login
-lacks workflow-upload scope. Once authorized, copy the template to
-`.github/workflows/tests.yml` to enable PR checks. Tests cover discovery, ownership,
-reconciliation, read-back, retries, failure reporting and secret hygiene.
-Runtime databases, logs, virtual environments, OAuth downloads, and unrelated
-hosting files are excluded from version control. This is a source repository;
-merging a PR does not automatically deploy to the installed LaunchAgent.
+Tests use temporary profiles and fake service boundaries; they need no credentials
+or live calendars. See [contributing](CONTRIBUTING.md), [security](SECURITY.md),
+and the [public-release checklist](docs/PUBLIC_RELEASE.md). An inactive macOS CI
+template is in `docs/github-actions-tests.yml`; an authorized maintainer can copy
+it to `.github/workflows/tests.yml` to enable hosted checks.
+
+Licensed under [MIT](LICENSE). This project is not affiliated with Instructure,
+Google or any institution. API behavior is described by the official
+[Canvas assignments documentation](https://developerdocs.instructure.com/services/canvas/resources/assignments)
+and [Apple launchd scheduling documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html).
