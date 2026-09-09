@@ -75,12 +75,12 @@ def get_secret(
 
 
 def setup_google(path: Path) -> dict[str, Any]:
-    try: config = json.loads(path.read_text(encoding="utf-8"))
+    try: client_config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error: raise CalendarError("invalid_client_secrets", "OAuth client-secrets file is unreadable or invalid.") from error
-    desktop = config.get("installed")
+    desktop = client_config.get("installed") if isinstance(client_config, dict) else None
     if not isinstance(desktop, dict) or not desktop.get("client_id") or not desktop.get("client_secret"):
         raise CalendarError("invalid_client_secrets", "A Google Desktop OAuth client-secrets file is required.")
-    flow = InstalledAppFlow.from_client_config(config, [config.GOOGLE_SCOPE])
+    flow = InstalledAppFlow.from_client_config(client_config, [config.GOOGLE_SCOPE])
     credentials = flow.run_local_server(port=0, access_type="offline", prompt="consent", open_browser=True)
     if not credentials.refresh_token: raise CalendarError("missing_refresh_token", "Google did not return an offline refresh token.")
     store_secret("client-id", desktop["client_id"]); store_secret("client-secret", desktop["client_secret"]); store_secret("refresh-token", credentials.refresh_token)
