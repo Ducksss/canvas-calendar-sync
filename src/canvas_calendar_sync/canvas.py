@@ -85,20 +85,30 @@ def parse_next_link(value: str | None) -> str | None:
     for part in (value or "").split(","):
         if re.search(r";\s*rel\s*=\s*\"?next\"?", part, re.I):
             match = re.search(r"<([^>]+)>", part)
-            return match.group(1) if match else None
+            if not match:
+                raise CanvasError("malformed_response", "Canvas returned a malformed next-page link.")
+            return match.group(1)
     return None
 
 
+class SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        CanvasClient.validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class CanvasClient:
-    def __init__(self, token: str, opener: Callable[..., Any] = urllib.request.urlopen, sleeper: Callable[[float], None] = time.sleep):
+    def __init__(self, token: str, opener: Callable[..., Any] | None = None, sleeper: Callable[[float], None] = time.sleep):
         if not token:
             raise ValueError("empty Canvas token")
-        self.token, self.opener, self.sleeper = token, opener, sleeper
+        self.token = token
+        self.opener = opener or urllib.request.build_opener(SameOriginRedirect()).open
+        self.sleeper = sleeper
 
     @staticmethod
     def validate_url(url: str) -> None:
         parsed, origin = urllib.parse.urlparse(url), urllib.parse.urlparse(BASE_URL)
-        if parsed.scheme != "https" or parsed.netloc != origin.netloc:
+        if parsed.scheme != "https" or parsed.netloc != origin.netloc or parsed.username or parsed.password:
             raise CanvasError("unsafe_pagination_url", "Canvas returned a pagination URL outside its HTTPS origin.")
 
     def request_page(self, url: str) -> Page:
@@ -170,10 +180,28 @@ def make_item(source_key: str, course: Mapping[str, Any], item_type: str, item_i
     return {"sourceKey": source_key, "courseId": course_id, "courseName": course_name, "courseCode": course_code, "itemType": item_type, "itemId": item_id, "title": title, "dueAt": due_at, "eventEndAt": end_at, "htmlUrl": url, "submitted": is_submitted, "sourceUpdatedAt": updated, "calendarTitle": calendar_title, "calendarDescription": description, "fingerprint": hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
+def required_id(value: Any) -> str:
+    if type(value) not in {int, str} or not str(value).isascii() or not str(value).isdigit() or int(value) <= 0:
+        raise CanvasError("malformed_response", "Canvas returned a missing or invalid coursework identity.")
+    return str(value)
+
+
+def deadline(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    parsed = parse_time(value)
+    if parsed is None:
+        raise CanvasError("malformed_response", "Canvas returned an invalid non-null deadline.")
+    return parsed
+
+
 def normalize_assignment(item: Mapping[str, Any], course: Mapping[str, Any], now: dt.datetime) -> dict[str, Any] | None:
     if item.get("published") is False or str(item.get("workflow_state", "")).lower() in {"deleted", "unpublished"}: return None
-    due, course_id, item_id = parse_time(item.get("due_at")), str(course.get("id", "")), str(item.get("id", ""))
-    if not due or due <= now or not course_id or not item_id: return None
+    course_id, item_id = required_id(course.get("id")), required_id(item.get("id"))
+    if "due_at" not in item:
+        raise CanvasError("malformed_response", "Canvas assignment omitted its deadline field.")
+    due = deadline(item["due_at"])
+    if not due or due <= now: return None
     types = {str(x) for x in item.get("submission_types", [])}
     kind = "quiz" if "online_quiz" in types else "discussion_topic" if "discussion_topic" in types else "external_tool" if "external_tool" in types else "assignment"
     url = urllib.parse.urljoin(BASE_URL, str(item.get("html_url") or ""))
@@ -182,14 +210,18 @@ def normalize_assignment(item: Mapping[str, Any], course: Mapping[str, Any], now
 
 def normalize_planner(item: Mapping[str, Any], courses: Mapping[str, Mapping[str, Any]], assignment_ids: set[tuple[str, str]], now: dt.datetime) -> dict[str, Any] | None:
     kind, p = str(item.get("plannable_type", "")).lower(), item.get("plannable")
-    if kind not in ALLOWED_PLANNER_TYPES or not isinstance(p, Mapping) or str(p.get("workflow_state", "")).lower() in {"deleted", "unpublished"}: return None
+    if kind not in ALLOWED_PLANNER_TYPES: return None
+    if not isinstance(p, Mapping):
+        raise CanvasError("malformed_response", "Canvas returned malformed planner coursework.")
+    if str(p.get("workflow_state", "")).lower() in {"deleted", "unpublished"}: return None
     course_id = str(item.get("course_id") or p.get("course_id") or "")
     nested = p.get("assignment") if isinstance(p.get("assignment"), Mapping) else {}
     assignment_id = str(p.get("assignment_id") or nested.get("id") or "")
-    if course_id not in courses or (assignment_id and (course_id, assignment_id) in assignment_ids): return None
-    due = next((t for t in (parse_time(p.get(k)) for k in ("due_at", "todo_date", "peer_review_due_at", "review_due_at")) if t), None) or parse_time(nested.get("due_at"))
-    item_id = str(item.get("plannable_id") or p.get("id") or "")
-    if not due or due <= now or not item_id: return None
+    if course_id not in courses: return None
+    if kind in {"quiz", "discussion_topic"} and assignment_id and (course_id, assignment_id) in assignment_ids: return None
+    due = next((t for t in (deadline(p.get(k)) for k in ("due_at", "todo_date", "peer_review_due_at", "review_due_at")) if t), None) or deadline(nested.get("due_at"))
+    item_id = required_id(item.get("plannable_id") or p.get("id"))
+    if not due or due <= now: return None
     url = urllib.parse.urljoin(BASE_URL, str(item.get("html_url") or ""))
     return make_item(f"canvas:{course_id}:{kind}:{item_id}", courses[course_id], kind, item_id, clean(p.get("title") or p.get("name"), f"{kind} {item_id}"), due, url, submitted(item.get("submissions")), p.get("updated_at") if isinstance(p.get("updated_at"), str) else None)
 
@@ -197,13 +229,13 @@ def normalize_planner(item: Mapping[str, Any], courses: Mapping[str, Mapping[str
 def discover(client: CanvasClient, now: dt.datetime | None = None) -> dict[str, Any]:
     current = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
     raw = client.get_all("/api/v1/courses", (("enrollment_state", "active"), ("enrollment_type", "student"), ("include[]", "term"), ("per_page", "100")))
-    courses = {str(x["id"]): x for x in raw if x.get("id") is not None}
+    courses = {required_id(x.get("id")): x for x in raw}
     normalized, assignment_ids = {}, set()
     for course_id, course in courses.items():
         assignments = client.get_all(f"/api/v1/courses/{urllib.parse.quote(course_id, safe='')}/assignments", (("include[]", "submission"), ("override_assignment_dates", "true"), ("order_by", "due_at"), ("per_page", "100")))
         for assignment in assignments:
-            aid = str(assignment.get("id", ""))
-            if aid: assignment_ids.add((course_id, aid))
+            aid = required_id(assignment.get("id"))
+            assignment_ids.add((course_id, aid))
             if found := normalize_assignment(assignment, course, current): normalized[found["sourceKey"]] = found
     end = current + dt.timedelta(days=550)
     term_ends = [parse_time(x.get("term", {}).get("end_at")) for x in courses.values() if isinstance(x.get("term"), Mapping)]

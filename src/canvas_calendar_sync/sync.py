@@ -30,7 +30,14 @@ def preflight_legacy(api: Any, legacy: dict[str, dict[str, Any]], owned: dict[st
     pending = {}
     for source, record in legacy.items():
         if source in owned: continue
-        event = get_event(api, record["eventId"])
+        try:
+            event = get_event(api, record["eventId"])
+        except CalendarError as error:
+            if error.code == "calendar_api_error" and error.status in {404, 410}:
+                continue
+            raise
+        if confirms_deleted(event):
+            continue
         if legacy_marker(source) not in str(event.get("description", "")):
             raise CalendarError("legacy_marker_mismatch", "A legacy mapped event did not contain its expected ownership marker.")
         pending[source] = event
