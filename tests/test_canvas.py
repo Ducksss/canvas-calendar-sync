@@ -19,7 +19,7 @@ class Response:
 
 
 def test_opaque_pagination_is_followed():
-    pages = [Response([{"id": 1}], '<https://canvas.nus.edu.sg/api/v1/courses?page=opaque>; rel="next"'), Response([{"id": 2}])]
+    pages = [Response([{"id": 1}], '<https://canvas.example.edu/api/v1/courses?page=opaque>; rel="next"'), Response([{"id": 2}])]
     client = CanvasClient("secret", opener=lambda *_a, **_k: pages.pop(0))
     assert [x["id"] for x in client.get_all("/api/v1/courses")] == [1, 2]
 
@@ -31,7 +31,7 @@ def test_cross_origin_pagination_fails():
 
 
 def test_throttle_exhaustion_fails():
-    error = urllib.error.HTTPError("https://canvas.nus.edu.sg/api/v1/courses", 429, "", {}, io.BytesIO())
+    error = urllib.error.HTTPError("https://canvas.example.edu/api/v1/courses", 429, "", {}, io.BytesIO())
     client = CanvasClient("secret", opener=lambda *_a, **_k: (_ for _ in ()).throw(error), sleeper=lambda _: None)
     with pytest.raises(CanvasError) as caught: client.get_all("/api/v1/courses")
     assert caught.value.code == "throttled"
@@ -43,11 +43,11 @@ def test_transient_server_error_retries_then_succeeds():
     def opener(*_args, **_kwargs):
         calls.append(1)
         if len(calls) < 3:
-            raise urllib.error.HTTPError("https://canvas.nus.edu.sg/api/v1/courses", 503, "", {}, io.BytesIO())
+            raise urllib.error.HTTPError("https://canvas.example.edu/api/v1/courses", 503, "", {}, io.BytesIO())
         return Response([])
 
     client = CanvasClient("secret", opener=opener, sleeper=delays.append)
-    assert client.request_page("https://canvas.nus.edu.sg/api/v1/courses").items == []
+    assert client.request_page("https://canvas.example.edu/api/v1/courses").items == []
     assert len(calls) == 3
     assert delays == [1.0, 2.0]
 
@@ -62,7 +62,7 @@ def test_transport_retries_then_succeeds():
         return Response([{"id": 1}])
 
     client = CanvasClient("secret", opener=opener, sleeper=delays.append)
-    assert client.request_page("https://canvas.nus.edu.sg/api/v1/courses").items == [{"id": 1}]
+    assert client.request_page("https://canvas.example.edu/api/v1/courses").items == [{"id": 1}]
     assert len(calls) == 3
     assert delays == [1.0, 2.0]
 
@@ -76,7 +76,7 @@ def test_transport_retry_exhaustion_preserves_safe_type():
 
     client = CanvasClient("secret", opener=opener, sleeper=delays.append)
     with pytest.raises(CanvasError) as caught:
-        client.request_page("https://canvas.nus.edu.sg/api/v1/courses")
+        client.request_page("https://canvas.example.edu/api/v1/courses")
     assert len(calls) == 4
     assert delays == [1.0, 2.0, 4.0]
     assert caught.value.code == "transport_error"

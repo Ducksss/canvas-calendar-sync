@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
-from .config import BASE_URL, CANVAS_KEYCHAIN_ACCOUNT, CANVAS_KEYCHAIN_SERVICE
+from . import config
 
 ALLOWED_PLANNER_TYPES = {"assessment_request", "discussion_topic", "peer_review_sub_assignment", "planner_note", "quiz", "sub_assignment"}
 MAX_PAGES = 1000
@@ -61,7 +61,7 @@ def keychain_token(
     for attempt in range(MAX_RETRIES + 1):
         try:
             result = command_runner(
-                ["/usr/bin/security", "find-generic-password", "-a", CANVAS_KEYCHAIN_ACCOUNT, "-s", CANVAS_KEYCHAIN_SERVICE, "-w"],
+                ["/usr/bin/security", "find-generic-password", "-a", config.settings.canvas_account, "-s", config.keychain_service(config.CANVAS_KEYCHAIN_SERVICE), "-w"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -107,7 +107,7 @@ class CanvasClient:
 
     @staticmethod
     def validate_url(url: str) -> None:
-        parsed, origin = urllib.parse.urlparse(url), urllib.parse.urlparse(BASE_URL)
+        parsed, origin = urllib.parse.urlparse(url), urllib.parse.urlparse(config.settings.canvas_url)
         if parsed.scheme != "https" or parsed.netloc != origin.netloc or parsed.username or parsed.password:
             raise CanvasError("unsafe_pagination_url", "Canvas returned a pagination URL outside its HTTPS origin.")
 
@@ -148,7 +148,7 @@ class CanvasClient:
 
     def get_all(self, path: str, params: Iterable[tuple[str, str]] = ()) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode(list(params), doseq=True)
-        url = urllib.parse.urljoin(BASE_URL, path.lstrip("/")) + (f"?{query}" if query else "")
+        url = urllib.parse.urljoin(config.settings.canvas_url, path.lstrip("/")) + (f"?{query}" if query else "")
         seen, result = set(), []
         for _ in range(MAX_PAGES):
             if url in seen: raise CanvasError("pagination_loop", "Canvas pagination repeated a page URL.")
@@ -175,7 +175,7 @@ def make_item(source_key: str, course: Mapping[str, Any], item_type: str, item_i
     course_id = str(course["id"]); course_name = clean(course.get("name"), f"Course {course_id}"); course_code = clean(course.get("course_code"), course_name)
     due_at, end_at = rfc3339(due), rfc3339(due + dt.timedelta(minutes=15))
     calendar_title = f"[Canvas] {course_code} — {title} due"
-    description = f"Course: {course_name}\nCanvas: {url}\nSynced automatically from NUS Canvas."
+    description = f"Course: {course_name}\nCanvas: {url}\nSynced automatically from Canvas."
     material = {"calendarTitle": calendar_title, "calendarDescription": description, "dueAt": due_at, "eventEndAt": end_at}
     return {"sourceKey": source_key, "courseId": course_id, "courseName": course_name, "courseCode": course_code, "itemType": item_type, "itemId": item_id, "title": title, "dueAt": due_at, "eventEndAt": end_at, "htmlUrl": url, "submitted": is_submitted, "sourceUpdatedAt": updated, "calendarTitle": calendar_title, "calendarDescription": description, "fingerprint": hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
@@ -204,7 +204,7 @@ def normalize_assignment(item: Mapping[str, Any], course: Mapping[str, Any], now
     if not due or due <= now: return None
     types = {str(x) for x in item.get("submission_types", [])}
     kind = "quiz" if "online_quiz" in types else "discussion_topic" if "discussion_topic" in types else "external_tool" if "external_tool" in types else "assignment"
-    url = urllib.parse.urljoin(BASE_URL, str(item.get("html_url") or ""))
+    url = urllib.parse.urljoin(config.settings.canvas_url, str(item.get("html_url") or ""))
     return make_item(f"canvas:{course_id}:assignment:{item_id}", course, kind, item_id, clean(item.get("name"), f"Assignment {item_id}"), due, url, submitted(item.get("submission")), item.get("updated_at") if isinstance(item.get("updated_at"), str) else None)
 
 
@@ -222,7 +222,7 @@ def normalize_planner(item: Mapping[str, Any], courses: Mapping[str, Mapping[str
     due = next((t for t in (deadline(p.get(k)) for k in ("due_at", "todo_date", "peer_review_due_at", "review_due_at")) if t), None) or deadline(nested.get("due_at"))
     item_id = required_id(item.get("plannable_id") or p.get("id"))
     if not due or due <= now: return None
-    url = urllib.parse.urljoin(BASE_URL, str(item.get("html_url") or ""))
+    url = urllib.parse.urljoin(config.settings.canvas_url, str(item.get("html_url") or ""))
     return make_item(f"canvas:{course_id}:{kind}:{item_id}", courses[course_id], kind, item_id, clean(p.get("title") or p.get("name"), f"{kind} {item_id}"), due, url, submitted(item.get("submissions")), p.get("updated_at") if isinstance(p.get("updated_at"), str) else None)
 
 
@@ -244,4 +244,4 @@ def discover(client: CanvasClient, now: dt.datetime | None = None) -> dict[str, 
     for raw_item in planner:
         if found := normalize_planner(raw_item, courses, assignment_ids, current): normalized.setdefault(found["sourceKey"], found)
     items = sorted(normalized.values(), key=lambda x: (x["dueAt"], x["sourceKey"]))
-    return {"schemaVersion": 1, "generatedAt": rfc3339(current), "canvasBaseUrl": BASE_URL, "courseCount": len(courses), "itemCount": len(items), "items": items}
+    return {"schemaVersion": 1, "generatedAt": rfc3339(current), "canvasBaseUrl": config.settings.canvas_url, "courseCount": len(courses), "itemCount": len(items), "items": items}

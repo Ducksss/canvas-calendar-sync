@@ -1,3 +1,3 @@
-"""Deterministic NUS Canvas to Google Calendar sync."""
+"""Canvas coursework to Google Calendar sync for macOS."""
 
-__version__ = "1.0.0"
+__version__ = "0.2.0"

@@ -1,8 +1,28 @@
 import pytest
+import json
+from types import SimpleNamespace
 from google.auth.exceptions import RefreshError, TransportError
 from keyring.errors import KeyringError
 
 from canvas_calendar_sync.google_calendar import CalendarError, get_secret, refresh_credentials, store_secret
+from canvas_calendar_sync import config, google_calendar
+
+
+def test_google_onboarding_imports_credentials_without_live_oauth(monkeypatch, tmp_path):
+    client = {"installed": {"client_id": "fixture-client", "client_secret": "fixture-secret"}}
+    path = tmp_path / "desktop-client.json"
+    path.write_text(json.dumps(client))
+    stored, calls = {}, []
+
+    def factory(client_config, scopes):
+        calls.append((client_config, scopes))
+        return SimpleNamespace(run_local_server=lambda **kwargs: SimpleNamespace(refresh_token="fixture-refresh"))
+
+    monkeypatch.setattr(google_calendar.InstalledAppFlow, "from_client_config", factory)
+    monkeypatch.setattr(google_calendar, "store_secret", lambda account, value: stored.__setitem__(account, value))
+    assert google_calendar.setup_google(path)["ok"] is True
+    assert calls == [(client, [config.GOOGLE_SCOPE])]
+    assert stored == {"client-id": "fixture-client", "client-secret": "fixture-secret", "refresh-token": "fixture-refresh"}
 
 
 def test_google_keychain_read_retries_then_succeeds():

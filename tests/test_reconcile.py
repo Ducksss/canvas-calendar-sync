@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from canvas_calendar_sync.config import OWNER
+from canvas_calendar_sync import config
 from canvas_calendar_sync.google_calendar import CalendarError
 from canvas_calendar_sync.state import State
 from canvas_calendar_sync.sync import reconcile
@@ -19,14 +19,17 @@ class Events:
         self.stored, self.fail_insert, self.deleted = stored, fail_insert, []
     def list(self, **kwargs): return Request(lambda: {"items": list(self.stored.values())})
     def get(self, eventId, **kwargs):
-        return Request(lambda: self.stored[eventId])
+        return Request(lambda: self.stored.get(eventId, {"status": "cancelled"}))
     def insert(self, body, **kwargs):
         def action():
             if self.fail_insert: raise OSError("offline")
             event = {"id": "new", **body}; self.stored["new"] = event; return event
         return Request(action)
     def update(self, eventId, body, **kwargs):
-        return Request(lambda: self.stored.setdefault(eventId, {"id": eventId, **body}))
+        def action():
+            self.stored[eventId] = {"id": eventId, **body}
+            return self.stored[eventId]
+        return Request(action)
     def delete(self, eventId, **kwargs):
         def action(): self.deleted.append(eventId); self.stored.pop(eventId, None); return None
         return Request(action)
@@ -42,8 +45,7 @@ def payload():
 
 
 def test_partial_create_failure_never_deletes(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr("canvas_calendar_sync.sync.load_legacy", lambda: {})
-    stale = {"id": "stale", "start": {"dateTime": "2027-02-01T00:00:00Z"}, "extendedProperties": {"private": {"canvasSyncOwner": OWNER, "canvasSourceKey": "canvas:old", "canvasFingerprint": "old"}}}
+    stale = {"id": "stale", "start": {"dateTime": "2027-02-01T00:00:00Z"}, "extendedProperties": {"private": {"canvasSyncOwner": config.settings.owner, "canvasSourceKey": "canvas:old", "canvasFingerprint": "old"}}}
     events = Events({"stale": stale}, fail_insert=True)
     state = State(tmp_path / "state.sqlite3")
     try:
@@ -53,9 +55,27 @@ def test_partial_create_failure_never_deletes(monkeypatch, tmp_path: Path):
 
 
 def test_dry_run_has_zero_mutations(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr("canvas_calendar_sync.sync.load_legacy", lambda: {})
     events = Events({})
     state = State(tmp_path / "state.sqlite3")
     try: result = reconcile(API(events), state, payload(), dry_run=True)
     finally: state.close()
     assert result["counts"]["create"] == 1 and events.stored == {}
+
+
+def test_create_unchanged_update_delete_lifecycle(tmp_path):
+    events, data = Events({}), payload()
+    data["items"][0]["dueAt"] = "2090-01-01T00:00:00Z"
+    data["items"][0]["eventEndAt"] = "2090-01-01T00:15:00Z"
+    state = State(tmp_path / "state.sqlite3")
+    try:
+        assert reconcile(API(events), state, data)["counts"]["create"] == 1
+        assert reconcile(API(events), state, data)["counts"]["unchanged"] == 1
+        data["items"][0].update(calendarTitle="Changed title", fingerprint="changed")
+        assert reconcile(API(events), state, data)["counts"]["update"] == 1
+        assert list(events.stored) == ["new"]
+        assert events.stored["new"]["summary"] == "Changed title"
+        assert reconcile(API(events), state, {"courseCount": 1, "itemCount": 0, "items": []})["counts"]["delete"] == 1
+        assert events.stored == {}
+        assert state.event_count() == 0
+    finally:
+        state.close()

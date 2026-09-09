@@ -1,7 +1,9 @@
 [project]
 name = "canvas-calendar-sync"
-version = "1.0.0"
-description = "Deterministic NUS Canvas to Google Calendar deadline sync"
+version = "0.2.0"
+description = "Sync Canvas coursework deadlines to Google Calendar on macOS"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "google-api-python-client==2.179.0",
