@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Canvas Calendar Sync</title>
+  <desc id="desc">An original calendar icon with a single forward arrow, representing one-way deadline sync.</desc>
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#132B36"/>
+  <rect x="28" y="34" width="72" height="66" rx="12" fill="#F7F5EF"/>
+  <path d="M28 54h72" stroke="#132B36" stroke-width="5"/>
+  <path d="M44 27v15M84 27v15" stroke="#F2AE72" stroke-width="7" stroke-linecap="round"/>
+  <path d="M43 77h40m-12-12 12 12-12 12" fill="none" stroke="#167D78" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
