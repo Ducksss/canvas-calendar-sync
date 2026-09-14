@@ -1,5 +1,10 @@
 # Canvas Calendar Sync
 
+[![Tests](https://github.com/Ducksss/canvas-calendar-sync/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Ducksss/canvas-calendar-sync/actions/workflows/tests.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue)](pyproject.toml)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](#quick-start)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Sync future Canvas coursework deadlines to a Google Calendar you own. Runs
 locally on macOS with Python, Keychain and launchd. No LLM, hosted backend or
 shared developer credentials are needed for normal operation.
@@ -8,11 +13,45 @@ shared developer credentials are needed for normal operation.
 Canvas institution and Google OAuth client. Institutional API restrictions may
 prevent access; the app stops rather than treating denied access as no deadlines.
 
+[Quick start](#quick-start) · [Google setup](docs/GOOGLE_SETUP.md) ·
+[Commands](#command-reference) · [Scheduling](#automatic-daily-execution) ·
+[Troubleshooting](#status-and-troubleshooting) · [Contributing](CONTRIBUTING.md)
+
+## Features
+
+- **One-way deadline sync:** create events for upcoming coursework and update
+  the same events when Canvas changes a title or due date.
+- **Your institution and timezone:** configure a Canvas HTTPS origin, owned
+  Google calendar, IANA timezone and daily execution time.
+- **Preview before writing:** inspect create/update/delete counts with a dry-run.
+- **Calendar-friendly reminders:** private 15-minute events, marked Free, with
+  reminders one day and one hour ahead. No guests or meeting links.
+- **Local daily automation:** macOS launchd handles execution and catch-up;
+  Codex and other LLMs are not involved at runtime.
+- **Guarded reconciliation:** complete discovery before writes, hidden ownership
+  markers, read-back verification and retention of past events.
+- **Local credential storage:** macOS Keychain, separate per-profile state,
+  structured rotating logs and bounded retries at API/credential boundaries.
+
+For example, a fictional assignment appears as:
+
+```text
+[Canvas] BIO101 — Lab report due
+18 Sep, 17:00–17:15 · Private · Free
+Course: Introduction to Biology
+Canvas: https://canvas.example.edu/courses/123/assignments/456
+```
+
+This is a command-line application, not a browser extension or hosted service.
+Google Calendar edits do not change Canvas. It never submits coursework.
+
 ## What gets synced
 
 - Published assignments in active student courses, including graded quizzes,
   discussions and external-tool work represented as Canvas assignments.
-- Relevant dated planner items, with assignment-linked items deduplicated.
+- Relevant dated planner items: quizzes, discussions, peer reviews,
+  sub-assignments and course-linked planner notes. Quiz/discussion representations
+  of an existing assignment are deduplicated; separate peer-review dates remain.
 - Student-specific assignment dates returned by Canvas; submitted work stays
   visible. Only future deadlines are imported.
 
@@ -28,6 +67,8 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), clone thi
 repository into a stable folder, and run:
 
 ```sh
+git clone https://github.com/Ducksss/canvas-calendar-sync.git
+cd canvas-calendar-sync
 uv sync --locked
 uv run --locked canvas-calendar-sync init \
   --canvas-url https://canvas.example.edu \
@@ -44,18 +85,27 @@ argument. Never paste a credential into an issue or commit.
 
 For Google setup, create your own Google Cloud project, enable the Calendar API,
 configure OAuth consent, and create a **Desktop app** OAuth client. Download its
-client-secrets JSON temporarily outside the checkout. Then run:
+client-secrets JSON temporarily outside the checkout. Follow the
+[step-by-step Google setup guide](docs/GOOGLE_SETUP.md), then run:
 
 ```sh
 uv run --locked canvas-calendar-sync setup-google --client-secrets /private/path/client-secrets.json
 uv run --locked canvas-calendar-sync probe
 uv run --locked canvas-calendar-sync sync --dry-run --json
+```
+
+Review the dry-run's counts and source keys, especially planned deletions. It
+reads the APIs and records a local run, but makes no Calendar changes. When the
+plan looks right, perform the first live sync:
+
+```sh
 uv run --locked canvas-calendar-sync sync --json
+uv run --locked canvas-calendar-sync status --json
 ```
 
 The browser consent requests `calendar.events.owned`. Use your primary calendar
 or an owned calendar ID supplied to `init --calendar-id ...`. Each user brings
-their own OAuth client: this repository does not distribute one. Google stores
+their own OAuth client: this repository does not distribute one. The app stores
 client credentials and the refresh token in Keychain; access tokens stay in
 memory. Remove the downloaded JSON after successful import; setup does not
 delete it for you.
@@ -64,6 +114,26 @@ External OAuth apps left in Testing commonly receive refresh tokens that expire
 after seven days for this scope. Configure the project's publishing status and
 consent appropriately; organizational policy may also apply. See Google's
 [OAuth token expiration guidance](https://developers.google.com/identity/protocols/oauth2#expiration).
+
+## Command reference
+
+Run commands as `uv run --locked canvas-calendar-sync COMMAND` from the checkout.
+Use `--help` or `COMMAND --help` for all options.
+
+| Command | Purpose | Calendar writes? |
+| --- | --- | --- |
+| `init --canvas-url URL --timezone ZONE` | Create a non-secret profile | No |
+| `setup-canvas` | Store a token through a hidden terminal prompt | No |
+| `setup-google --client-secrets PATH` | Browser authorization and Keychain import | No |
+| `probe` | Check Canvas and Calendar access | No |
+| `sync --dry-run --json` | Discover deadlines and preview reconciliation | No |
+| `sync --json` | Run immediately | Yes |
+| `sync --scheduled --json` | Run only when the daily guard permits | When due |
+| `status --json` | Read local run history and query owned-event count | No |
+| `install-schedule [--dry-run]` | Preview or write a LaunchAgent; does not load it | No |
+
+`probe` and `status` need network access. A successful `probe` confirms access,
+not that every course can be discovered; the complete dry-run checks that path.
 
 ## Configuration and profiles
 
@@ -147,6 +217,11 @@ be a dry-run: a dry-run records its outcome but does not mark the day synced.
 Manual `sync --json` runs immediately even before the daily time or during a
 scheduled retry cooldown. A manual success also satisfies the daily guard.
 
+A healthy live result has `ok: true` and `dryRun: false`. Counts of zero are normal
+when nothing changed. In `status`, check `lastRun.status` and
+`lastSuccessfulLocalDate`, and look for `calendarError`: top-level `ok: true`
+alone does not establish Calendar connectivity or a successful daily sync.
+
 Structured logs are under the profile's `logs/sync.jsonl` and rotate at 1 MB
 with five backups. Scheduled failures show a generic macOS notification. Logs
 include safe error codes, exception classes and execution stages, not unexpected
@@ -178,7 +253,13 @@ Successful earlier writes are not rolled back after a later failure. An ambiguou
 Calendar insert response can produce a duplicate; duplicate ownership stops the
 next reconciliation for investigation. This is not an exactly-once transaction
 across two APIs. Discovery covers Canvas APIs, not all material a course may
-publish. No Windows/Linux scheduler or credential backend is currently supported.
+publish. Planner discovery looks at least 550 days ahead (extended for later
+course term ends); assignments have no equivalent future cutoff. No
+Windows/Linux scheduler or credential backend is currently supported.
+
+The app does not crawl module pages, attachments, syllabuses or external-tool
+websites. Missing deadlines in those sources cannot be inferred. It is a useful
+reminder aid, not a replacement for checking your course's official requirements.
 
 Older personal installations use a different state directory and event marker.
 They are not automatically migrated. See [migration notes](docs/MIGRATION.md).
@@ -194,9 +275,10 @@ uv build
 
 Tests use temporary profiles and fake service boundaries; they need no credentials
 or live calendars. See [contributing](CONTRIBUTING.md), [security](SECURITY.md),
-and the [public-release checklist](docs/PUBLIC_RELEASE.md). An inactive macOS CI
-template is in `docs/github-actions-tests.yml`; an authorized maintainer can copy
-it to `.github/workflows/tests.yml` to enable hosted checks.
+and the [release checklist](docs/PUBLIC_RELEASE.md).
+[GitHub Actions](https://github.com/Ducksss/canvas-calendar-sync/actions/workflows/tests.yml)
+runs the offline tests, compilation check and package build on macOS for pull
+requests and pushes to `main`. CI never uses personal API credentials or calendars.
 
 Licensed under [MIT](LICENSE). This project is not affiliated with Instructure,
 Google or any institution. API behavior is described by the official
